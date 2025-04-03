@@ -1,0 +1,3 @@
+[functions]
+[functions.send-pin-email]
+verify_jwt = false
