@@ -65,12 +65,30 @@ function TimeControl() {
         if (lastEntry && lastEntry.length > 0) {
           const lastEntryType = lastEntry[0].entry_type;
 
-          // Actualizar el estado según la última entrada
-          switch (lastEntryType) {
-            case 'clock_in':
+          // Verificar si hay un clock_in sin clock_out correspondiente
+          if (lastEntryType === 'clock_in') {
+            const { data: hasClockOut, error: clockOutError } = await supabase
+              .from('time_entries')
+              .select('*')
+              .eq('employee_id', employeeId)
+              .eq('entry_type', 'clock_out')
+              .gt('timestamp', lastEntry[0].timestamp)
+              .limit(1);
+
+            if (clockOutError) throw clockOutError;
+
+            if (!hasClockOut || hasClockOut.length === 0) {
               setCurrentState('working');
               setSelectedWorkCenter(lastEntry[0].work_center);
               setSelectedTimeType(lastEntry[0].time_type);
+              return;
+            }
+          }
+
+          // Actualizar el estado según la última entrada
+          switch (lastEntryType) {
+            case 'clock_in':
+              setCurrentState('initial');
               break;
             case 'break_start':
               setCurrentState('paused');
@@ -109,109 +127,101 @@ function TimeControl() {
   }, []);
 
   const handleTimeEntry = async (entryType: 'clock_in' | 'break_start' | 'break_end' | 'clock_out') => {
-  try {
-    setLoading(true);
-    setError(null);
+    try {
+      setLoading(true);
+      setError(null);
 
-    const employeeId = localStorage.getItem('employeeId');
-    if (!employeeId) {
-      throw new Error('No se encontró el ID del empleado');
-    }
-
-    // Para clock_in, necesitamos el tipo de tiempo
-    if (entryType === 'clock_in') {
-      if (!selectedTimeType) {
-        setShowTypeSelector(true);
-        return;
+      const employeeId = localStorage.getItem('employeeId');
+      if (!employeeId) {
+        throw new Error('No se encontró el ID del empleado');
       }
-      
-      // Si hay más de un centro de trabajo y no hay uno seleccionado
-      if (workCenters.length > 1 && !selectedWorkCenter) {
-        setShowWorkCenterSelector(true);
-        return;
+
+      // Para clock_in, necesitamos el tipo de tiempo
+      if (entryType === 'clock_in') {
+        if (!selectedTimeType) {
+          setShowTypeSelector(true);
+          return;
+        }
+        
+        // Si hay más de un centro de trabajo y no hay uno seleccionado
+        if (workCenters.length > 1 && !selectedWorkCenter) {
+          setShowWorkCenterSelector(true);
+          return;
+        }
       }
-    }
 
-    // Para clock_out, verificamos si hay alguna entrada sin salida (no importa el día)
-    if (entryType === 'clock_out') {
-      const { data: openEntries, error: openEntriesError } = await supabase
-        .from('time_entries')
-        .select('*')
-        .eq('employee_id', employeeId)
-        .eq('entry_type', 'clock_in')
-        .is('clock_out_id', null);
-
-      if (openEntriesError) throw openEntriesError;
-      if (!openEntries || openEntries.length === 0) {
-        throw new Error('No hay ninguna entrada activa para registrar la salida');
-      }
-    }
-
-    const { data: entryData, error: insertError } = await supabase
-      .from('time_entries')
-      .insert([{
-        employee_id: employeeId,
-        entry_type: entryType,
-        time_type: entryType === 'clock_in' ? selectedTimeType : null,
-        work_center: entryType === 'clock_in' ? selectedWorkCenter : null,
-        timestamp: new Date().toISOString(),
-      }])
-      .select()
-      .single();
-
-    if (insertError) throw insertError;
-
-    // Si es una salida, actualizamos la entrada correspondiente
-    if (entryType === 'clock_out') {
-      // Buscamos la última entrada sin salida
-      const { data: lastEntry, error: lastEntryError } = await supabase
-        .from('time_entries')
-        .select('*')
-        .eq('employee_id', employeeId)
-        .eq('entry_type', 'clock_in')
-        .is('clock_out_id', null)
-        .order('timestamp', { ascending: false })
-        .limit(1);
-
-      if (lastEntryError) throw lastEntryError;
-
-      if (lastEntry && lastEntry.length > 0) {
-        // Actualizamos la entrada con el ID de la salida
-        const { error: updateError } = await supabase
+      // Para clock_out, verificamos si hay un clock_in sin clock_out posterior
+      if (entryType === 'clock_out') {
+        const { data: lastClockIn, error: lastClockInError } = await supabase
           .from('time_entries')
-          .update({ clock_out_id: entryData.id })
-          .eq('id', lastEntry[0].id);
+          .select('*')
+          .eq('employee_id', employeeId)
+          .eq('entry_type', 'clock_in')
+          .order('timestamp', { ascending: false })
+          .limit(1);
 
-        if (updateError) throw updateError;
+        if (lastClockInError) throw lastClockInError;
+
+        if (lastClockIn && lastClockIn.length > 0) {
+          const { data: subsequentClockOut, error: subsequentError } = await supabase
+            .from('time_entries')
+            .select('*')
+            .eq('employee_id', employeeId)
+            .eq('entry_type', 'clock_out')
+            .gt('timestamp', lastClockIn[0].timestamp)
+            .limit(1);
+
+          if (subsequentError) throw subsequentError;
+
+          if (subsequentClockOut && subsequentClockOut.length > 0) {
+            throw new Error('Ya existe una salida registrada para esta entrada');
+          }
+        } else {
+          throw new Error('No hay ninguna entrada activa para registrar la salida');
+        }
       }
-    }
 
-    // Actualizar el estado según la entrada registrada
-    switch (entryType) {
-      case 'clock_in':
-        setCurrentState('working');
-        break;
-      case 'break_start':
-        setCurrentState('paused');
-        break;
-      case 'break_end':
-        setCurrentState('working');
-        break;
-      case 'clock_out':
-        setCurrentState('initial');
-        setSelectedTimeType(null);
-        setSelectedWorkCenter(null);
-        break;
+      // Insertar la nueva entrada
+      const { data: entryData, error: insertError } = await supabase
+        .from('time_entries')
+        .insert([{
+          employee_id: employeeId,
+          entry_type: entryType,
+          time_type: entryType === 'clock_in' ? selectedTimeType : null,
+          work_center: entryType === 'clock_in' ? selectedWorkCenter : null,
+          timestamp: new Date().toISOString(),
+        }])
+        .select()
+        .single();
+
+      if (insertError) throw insertError;
+
+      // Actualizar el estado según la entrada registrada
+      switch (entryType) {
+        case 'clock_in':
+          setCurrentState('working');
+          break;
+        case 'break_start':
+          setCurrentState('paused');
+          break;
+        case 'break_end':
+          setCurrentState('working');
+          break;
+        case 'clock_out':
+          setCurrentState('initial');
+          setSelectedTimeType(null);
+          setSelectedWorkCenter(null);
+          break;
+      }
+    } catch (err) {
+      console.error('Error recording time entry:', err);
+      setError(err instanceof Error ? err.message : 'Error al registrar el fichaje');
+    } finally {
+      setLoading(false);
+      setShowTypeSelector(false);
+      setShowWorkCenterSelector(false);
     }
-  } catch (err) {
-    console.error('Error recording time entry:', err);
-    setError(err instanceof Error ? err.message : 'Error al registrar el fichaje');
-  } finally {
-    setLoading(false);
-    setShowTypeSelector(false);
-    setShowWorkCenterSelector(false);
-  }
-};
+  };
 
   const handleSelectWorkCenter = (center: string) => {
     setSelectedWorkCenter(center);
